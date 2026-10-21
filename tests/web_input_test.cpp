@@ -1,4 +1,4 @@
-// Strict web-form number parsing + range snapping (src/web_input.h). Guards the /save
+// Strict web-form number parsing + range repair (src/web_input.h). Guards the /save
 // handler: String::toDouble() read "38,84" as 38 and "" as 0 — both inside the valid
 // range, both saved, then the device restarted centred on the wrong point.
 #include "web_input.h"
@@ -40,17 +40,24 @@ int main() {
     double keep = 42.0;
     assert(!parseDoubleStrict("", &keep) && keep == 42.0);
 
-    // --- range snapping onto RANGE_STEPS_KM ---
-    assert(snapRangeKm(30.0f) == 30.0f);       // already a step: unchanged
-    assert(snapRangeKm(24.0f) == 20.0f);
-    assert(snapRangeKm(26.0f) == 30.0f);
-    assert(snapRangeKm(15.0f) == 10.0f);       // equidistant tie -> lower step
-    assert(snapRangeKm(0.0f) == 10.0f);        // stored 0 must never reach projectToScreen
-    // For an absurd input the only contract is "lands on SOME step" (float ULPs make
-    // 1e9-100 and 1e9-150 tie), never a div-by-zero 0.
-    const float absurd = snapRangeKm(1e9f);
-    bool absurdIsStep = false;
-    for (float s : RANGE_STEPS_KM) if (s == absurd) absurdIsStep = true;
-    assert(absurdIsStep);
+    // --- range repair: only values that can't work change ---
+    assert(repairRangeKm(30.0f) == 30.0f);     // a preset: unchanged
+    assert(repairRangeKm(15.0f) == 15.0f);     // web-page presets the zoom ladder lacks stay
+    assert(repairRangeKm(25.0f) == 25.0f);
+    assert(repairRangeKm(20.0f) == 20.0f);     // a zoom-button step the web list lacks stays
+    assert(repairRangeKm(42.0f) == 42.0f);     // any in-range value stays (nothing snaps)
+    assert(repairRangeKm(150.0f) == 150.0f);   // the top of the web list
+    assert(repairRangeKm(250.0f) == RANGE_KM_MAX);   // the old web page's 250 km -> 150
+    assert(repairRangeKm(1e9f) == RANGE_KM_MAX);
+    assert(repairRangeKm(5.0f) == RANGE_KM_MIN);
+    assert(repairRangeKm(0.0f) == RANGE_KM_DEFAULT);  // 0 must never reach projectToScreen
+    assert(repairRangeKm(-30.0f) == RANGE_KM_DEFAULT);
+    assert(repairRangeKm(0.0f / 0.0f) == RANGE_KM_DEFAULT);   // NaN (a corrupt NVS float)
+    assert(repairRangeKm(1.0f / 0.0f) == RANGE_KM_DEFAULT);   // +inf
+    assert(repairRangeKm(-1.0f / 0.0f) == RANGE_KM_DEFAULT);  // -inf
+    // The web list must stay inside the repair bounds, or the page would offer a value
+    // that /save immediately changes.
+    for (float s : WEB_RANGE_KM) assert(repairRangeKm(s) == s);
+    for (float s : RANGE_STEPS_KM) assert(repairRangeKm(s) == s);
     return 0;
 }

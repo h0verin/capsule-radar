@@ -279,9 +279,9 @@ static void loadSettings() {
     p.begin("capsuleradar", true);
     g_settings.homeLat = p.getDouble("homeLat", HOME_LAT_DEFAULT);
     g_settings.homeLon = p.getDouble("homeLon", HOME_LON_DEFAULT);
-    // Snap onto the preset steps: an old install may hold a value the web page once
-    // offered (e.g. its 250 km) or even 0 (divides by zero in geo::projectToScreen).
-    g_settings.rangeKm = snapRangeKm(p.getFloat("rangeKm", RANGE_KM_DEFAULT));
+    // Repair a value that can't work: an old install may hold the 250 km the web page once
+    // offered (clamped to 150) or even 0 (divides by zero in geo::projectToScreen).
+    g_settings.rangeKm = repairRangeKm(p.getFloat("rangeKm", RANGE_KM_DEFAULT));
     // floor of 5: a stored 0 would boot with the panel dark forever, looking like a dead board
     g_brightnessDay    = constrain(p.getInt("bright", BRIGHTNESS_DEFAULT), 5, 255);
     g_volume           = p.getInt("vol", 60);
@@ -458,18 +458,28 @@ static bool refuseUnlessPageFetch() {
 
 static void handleRoot() {
     const int th = radar::theme();
-    // Same preset list as the zoom button (config.h); the page's own list offered 250 km,
+    // The page's own list (WEB_RANGE_KM, config.h) ends at 150 km: it once offered 250,
     // which the feed query clamps to ADSB_QUERY_MAX_KM — the outer rings stayed empty.
     // The value submitted stays in km (the device works in km); only the label is shown in
-    // the user's chosen distance unit so the config page matches the screen.
+    // the user's chosen distance unit so the config page matches the screen. A stored
+    // range that isn't in the list (20 km from the zoom button) gets its own entry with its
+    // exact value, so saving the form with the other fields leaves the range alone.
     const float    ufac  = (g_units == 0) ? 0.539957f : (g_units == 2 ? 0.621371f : 1.0f);
     const char    *uname = (g_units == 0) ? "nm" : (g_units == 2 ? "mi" : "km");
     String ropts;
-    for (float rkm : RANGE_STEPS_KM) {
-        const int r = (int)(rkm + 0.5f);
+    bool   rlisted = false;
+    for (float rkm : WEB_RANGE_KM) {
+        const bool sel = fabsf(rkm - g_settings.rangeKm) < 0.05f;
+        if (sel) rlisted = true;
         char o[72];
         snprintf(o, sizeof(o), "<option value=%d%s>%.0f %s</option>",
-                 r, (r == (int)(g_settings.rangeKm + 0.5f)) ? " selected" : "", rkm * ufac, uname);
+                 (int)(rkm + 0.5f), sel ? " selected" : "", rkm * ufac, uname);
+        ropts += o;
+    }
+    if (!rlisted) {
+        char o[80];
+        snprintf(o, sizeof(o), "<option value=%.2f selected>%.0f %s</option>",
+                 g_settings.rangeKm, g_settings.rangeKm * ufac, uname);
         ropts += o;
     }
     const char *tnames[] = {"Phosphor", "Orb", "Amber CRT", "Military"};
@@ -725,8 +735,8 @@ static void handleSave() {
     p.begin("capsuleradar", false);
     if (g_web.hasArg("lat"))   p.putDouble("homeLat", lat);
     if (g_web.hasArg("lon"))   p.putDouble("homeLon", lon);
-    // range: stored on the preset ladder — never 0 (divides by zero in geo::projectToScreen)
-    if (g_web.hasArg("range")) p.putFloat("rangeKm", snapRangeKm((float)range));
+    // range: repaired, not snapped — never 0 (divides by zero in geo::projectToScreen)
+    if (g_web.hasArg("range")) p.putFloat("rangeKm", repairRangeKm((float)range));
     if (g_web.hasArg("theme")) p.putInt("theme", g_web.arg("theme").toInt());
     if (tzIdx >= 0 && tzIdx < TZOPTS_N) p.putString("tz", TZOPTS[tzIdx].tz);
     p.end();
