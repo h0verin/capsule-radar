@@ -25,6 +25,14 @@ the display is initialised, and its QSPI CS/SCLK (GPIO 9/10) are the 1.75's I2S 
 which is why audio must stay compiled out here. The panel gap is the same 6 as the 1.75.
 Full detail in `docs/HARDWARE.md`.
 
+### Third board (experimental): ESP32-S3-Touch-LCD-2.1
+Contributed by @alexzogh (#45). A 480x480 **ST7701 RGB** LCD driven through esp_lcd (no
+Arduino_GFX), CST820 touch, TCA9554 expander, no PMIC or audio. Pins in
+`src/boards/board_lcd_21.h`; its display glue is `src/display_st7701.cpp`, a separate copy of
+`display.cpp`'s API, so a change to `display.cpp` (touch queue, brightness, sweep) may need
+porting there. Build with `-e esp32-s3-lcd-21`: `custom_sdkconfig` rebuilds ESP-IDF, so the
+first build is slow. Known issue: the picture shifts sideways (#49).
+
 ## Stack decision
 **PlatformIO + Arduino framework.** Libraries:
 - `moononournation/GFX Library for Arduino` (Arduino_GFX) — CO5300 QSPI panel driver + framebuffer.
@@ -87,6 +95,7 @@ coastline data, and `sim_main.cpp` (the desktop SDL simulator).
 ```
 pio run -e esp32-s3-amoled-175              # build (reference board)
 pio run -e esp32-s3-amoled-143              # build (1.43)
+pio run -e esp32-s3-lcd-21                  # build (LCD 2.1, experimental)
 pio run -e esp32-s3-amoled-175 -t upload    # flash over USB-C
 pio device monitor -b 115200                # serial
 ```
