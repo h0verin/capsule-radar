@@ -16,16 +16,30 @@
 // read next was usually still face-down (a hand lifting the radar, a finger on the glass
 // while laying it down). The radar then took face-down for its resting pose and stayed lit
 // face-down until it had stood upright long enough for the baseline to drift back.
+//
+// While the screen is dark, a touch only wakes it: the press never reaches the UI
+// (TouchQueue::setWakeOnly), so a wake-up tap can't select a plane or change the theme.
 #include <stdint.h>
 #include "config.h"
+
+// A touch since the previous check, at whatever pace the loop runs the checks. inactiveMs:
+// time since the last touch (LVGL inactivity); sinceLastCheckMs: time since the previous
+// check, taken before it is updated. The checks are due every FACEDOWN_CHECK_MS but run
+// 400-1200 ms apart on a loop busy with frames and the GPS read, so the old "touched in the
+// last FACEDOWN_CHECK_MS" missed most quick taps on the dark screen: the next check found
+// the tap already 500-800 ms old.
+inline bool touchedSinceLastCheck(uint32_t inactiveMs, uint32_t sinceLastCheckMs) {
+    return inactiveMs < sinceLastCheckMs;
+}
 
 class FaceDownSleep {
 public:
     // One check. az: accelerometer Z (±2 g full scale, 16384 LSB/g); haveAz is false when the
     // read failed. A failed read leaves the state as it is: the shared I2C bus is noisy, and
     // treating a failure as "not face-down" kept resetting the count, so the screen never
-    // slept. touchedMs: time since the last touch (LVGL inactivity). enabled: the web setting.
-    void update(bool haveAz, int16_t az, uint32_t touchedMs, bool enabled) {
+    // slept. touched: a touch since the previous check (touchedSinceLastCheck above).
+    // enabled: the web setting.
+    void update(bool haveAz, int16_t az, bool touched, bool enabled) {
         if (haveAz) {
             if (!_haveRef) { _ref = az; _haveRef = true; }
             const bool down = (_ref < 0) ? (az > FACEDOWN_THRESHOLD) : (az < -FACEDOWN_THRESHOLD);
@@ -36,7 +50,7 @@ public:
                 _ref += (az - _ref) >> 4;    // EMA toward the current (not face-down) pose
             }
         }
-        if (touchedMs < FACEDOWN_CHECK_MS) _count = 0;   // a touch since the last check
+        if (touched) _count = 0;
         _asleep = enabled && _count >= FACEDOWN_COUNT;
     }
 

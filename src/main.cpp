@@ -1296,17 +1296,19 @@ void loop() {
     // face-down -> screen off (IMU); flip face-up or touch to wake (see facedown_sleep.h)
     static uint32_t lastImu = 0;
     static FaceDownSleep faceDown;
-    if (millis() - lastImu > FACEDOWN_CHECK_MS) {
-        lastImu = millis();
+    const uint32_t nowImu = millis();
+    if (nowImu - lastImu > FACEDOWN_CHECK_MS) {
+        const bool touched = touchedSinceLastCheck(display::inactiveMs(), nowImu - lastImu);
+        lastImu = nowImu;
         int16_t az = 0;
         const bool haveAz = imu_read_az(&az);
-        faceDown.update(haveAz, az, display::inactiveMs(), g_fdSleep);   // g_fdSleep: web toggle
+        faceDown.update(haveAz, az, touched, g_fdSleep);   // g_fdSleep: web toggle
         const bool sleep = faceDown.asleep();
         const bool idle  = g_idleDimMs > 0 && display::inactiveMs() > g_idleDimMs;
         if (sleep != g_asleep || idle != g_idle) {
             g_asleep = sleep;
             g_idle = idle;
-            applyBrightness();
+            applyBrightness();   // dark (0) also makes a touch only wake it (display.h)
         }
     }
 
