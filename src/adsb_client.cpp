@@ -96,8 +96,10 @@ bool AdsbClient::fetchFrom(int slot, std::vector<Aircraft>& out) {
 #endif
     // The core's default TLS handshake timeout is 120 s. If a server accepts the TCP
     // connection but never answers the handshake, that blocks this task for two minutes
-    // per provider, and two in a row trip the 180 s restart backstop. A handshake takes
-    // well under a second when things work, so give up early and let the next poll retry.
+    // per provider: the radar goes stale for that long, and two in a row pass the feed
+    // watchdog's 180 s mark (feed_watchdog.h), which reboots when the heap is fragmented.
+    // A handshake takes well under a second when things work, so give up early and let
+    // the next poll retry.
     client.setHandshakeTimeout(TLS_HANDSHAKE_S);
 
     _pacer.onAttempt(slot, millis());
@@ -169,6 +171,24 @@ bool AdsbClient::fetchFrom(int slot, std::vector<Aircraft>& out) {
             if (sp)
                 Serial.printf("[adsb] %s rate-limited; spacing requests %us apart\n",
                               host, (unsigned)(sp / 1000));
+        } else if (code <= 0) {
+            // No answer at all (connect refused, TLS, read timeout). Until this branch
+            // existed the pacer ignored such failures, so a silent provider was re-asked
+            // every poll at its full connect+TLS timeout price and the radar only updated
+            // as fast as the surviving providers answered.
+            // Log the gap that actually applies: while every provider is silent the pacer
+            // caps it at ADSB_SILENCE_OUTAGE_MAX_MS, below the stored one.
+            const uint32_t sp = _pacer.onTransportFail(slot);
+            if (sp) {
+                const uint32_t gap = _pacer.gapMs(slot, millis());
+                if (gap < sp)
+                    Serial.printf("[adsb] %s silent (HTTP %d); spacing requests %us apart "
+                                  "while every provider is silent, %us once one answers\n",
+                                  host, code, (unsigned)(gap / 1000), (unsigned)(sp / 1000));
+                else
+                    Serial.printf("[adsb] %s silent (HTTP %d); spacing requests %us apart\n",
+                                  host, code, (unsigned)(gap / 1000));
+            }
         }
         http.end(); return false;
     }
