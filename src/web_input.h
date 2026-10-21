@@ -1,11 +1,12 @@
 #pragma once
-// Strict parsing + snapping of numbers that arrive from the config web page.
+// Strict parsing + repair of numbers that arrive from the config web page.
 //
 // Extracted so tests/web_input_test.cpp can exercise it on the host. Arduino's
 // String::toDouble() stops at the first non-numeric character, so "38,84" silently
 // becomes 38 and "" becomes 0 — both then pass a simple range check, get saved, and
 // the device restarts centred on the wrong point. Everything here therefore validates
 // the WHOLE string before returning a value.
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include "config.h"
@@ -33,18 +34,14 @@ inline bool parseDoubleStrict(const char *s, double *out) {
     return true;
 }
 
-// Nearest entry of RANGE_STEPS_KM (ties go to the lower step). Also repairs a stored
-// value the presets don't contain — 0 would divide by zero in geo::projectToScreen,
-// and the old web page's 250 km promise is clamped away by ADSB_QUERY_MAX_KM anyway.
-inline float snapRangeKm(float km) {
-    const int n = (int)(sizeof(RANGE_STEPS_KM) / sizeof(RANGE_STEPS_KM[0]));
-    int best = 0;
-    float bestD = km - RANGE_STEPS_KM[0];
-    if (bestD < 0) bestD = -bestD;
-    for (int i = 1; i < n; ++i) {
-        float d = km - RANGE_STEPS_KM[i];
-        if (d < 0) d = -d;
-        if (d < bestD) { bestD = d; best = i; }
-    }
-    return RANGE_STEPS_KM[best];
+// Repair a display range that cannot work, and leave every other value as the user set
+// it (a saved 15 or 25 km from the web page, 20 km from the zoom button). Not finite or
+// <= 0 (0 divides by zero in geo::projectToScreen) -> RANGE_KM_DEFAULT; anything else is
+// clamped to [RANGE_KM_MIN, RANGE_KM_MAX] — an old web-page 250 km becomes 150, which is
+// as far as the feed query goes (ADSB_QUERY_MAX_KM).
+inline float repairRangeKm(float km) {
+    if (!isfinite(km) || km <= 0.0f) return RANGE_KM_DEFAULT;
+    if (km < RANGE_KM_MIN) return RANGE_KM_MIN;
+    if (km > RANGE_KM_MAX) return RANGE_KM_MAX;
+    return km;
 }
