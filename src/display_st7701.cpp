@@ -157,12 +157,14 @@ static bool rgb_panel_begin() {
     cfg.data_width = 16;
     cfg.bits_per_pixel = 16;
     cfg.num_fbs = 2;                        // 2 framebuffers = double-buffered (tear-free page flip).
-    // NO bounce buffer — permanently. Its refill ISR memcpy's from the PSRAM framebuffer, and
-    // PSRAM is unreachable while the cache is disabled during a WiFi/NVS flash op, so the copy
-    // faults ("Cache disabled..." with A4=0x2580=9600=this buffer). Making the ISR IRAM-safe
-    // can't help — the DATA it reads lives in PSRAM. Drift is instead controlled by a modest
-    // pixel clock (RGB_PCLK_HZ) so direct-from-PSRAM DMA comfortably keeps up, plus the
-    // per-VSYNC transmission restart (CONFIG_LCD_RGB_RESTART_IN_VSYNC) which resyncs each frame.
+    // Bounce buffers: 2 x 10 lines in internal RAM (2 x 9.6 KB). The DMA streams from them
+    // and an ISR refills each from the PSRAM framebuffer as it empties (~0.46 ms per 10 lines
+    // at 12 MHz). Streaming straight from PSRAM, the DMA fell behind whenever the CPU or WiFi
+    // was busy in PSRAM and the picture shifted sideways (#49), more with more aircraft.
+    // The refill reads PSRAM, which is unreachable while a WiFi/NVS flash op has the cache
+    // off ("Cache disabled..." with A4=0x2580=9600=this buffer), so the RGB/GDMA ISRs are
+    // NOT IRAM-safe (platformio.ini): they are held off during the flash op instead.
+    cfg.bounce_buffer_size_px = 10 * SCREEN_W;
     cfg.hsync_gpio_num = RGB_HSYNC;
     cfg.vsync_gpio_num = RGB_VSYNC;
     cfg.de_gpio_num    = RGB_DE;
