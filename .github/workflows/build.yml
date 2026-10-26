@@ -32,7 +32,15 @@ jobs:
         if: matrix.env == 'esp32-s3-lcd-21'
         run: |
           SDK=.pio/build/esp32-s3-lcd-21/config/sdkconfig.h
-          for flag in LCD_RGB_ISR_IRAM_SAFE GDMA_ISR_IRAM_SAFE GDMA_CTRL_FUNC_IN_IRAM; do
+          # The bounce-buffer refill reads the PSRAM framebuffer, so these ISRs must not be
+          # IRAM-safe: they are held off during flash operations instead of running cache-off.
+          for flag in LCD_RGB_ISR_IRAM_SAFE GDMA_ISR_IRAM_SAFE; do
+            if grep -q "^#define CONFIG_${flag} " "$SDK"; then
+              echo "CONFIG_${flag} must stay off (bounce-buffer refill reads PSRAM)" >&2
+              exit 1
+            fi
+          done
+          for flag in GDMA_CTRL_FUNC_IN_IRAM LCD_RGB_RESTART_IN_VSYNC SPIRAM_TRY_ALLOCATE_WIFI_LWIP; do
             grep -qx "#define CONFIG_${flag} 1" "$SDK"
           done
       - name: Package USB and OTA images
