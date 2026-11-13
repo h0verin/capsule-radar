@@ -155,6 +155,16 @@ static size_t gen_beep(int16_t *buf, size_t cap, float freq, int ms, float amp) 
     return i * 2;                                  // samples written (stereo interleaved)
 }
 
+// Queue `ms` of silence. A gap between beeps must be written as samples: the DMA holds
+// ~64 ms (4 x 256 frames at 16 kHz), so i2s_write() returns while a beep is still playing,
+// and a delay() shorter than that leaves no audible gap (the double beep sounds like one).
+static void write_silence(int16_t *buf, int ms) {
+    const size_t n = (size_t)((long)SR * ms / 1000) * 2;   // stereo samples
+    memset(buf, 0, n * sizeof(int16_t));
+    size_t bw;
+    i2s_write(I2S_PORT, buf, n * 2, &bw, portMAX_DELAY);
+}
+
 static void play_cue(int cue) {
     if (!s_ok || !s_buf || (s_muted && cue != 2) || s_vol <= 0) return;
     int16_t *buf = s_buf;
@@ -174,7 +184,7 @@ static void play_cue(int cue) {
         for (int k = 0; k < 2; ++k) {
             size_t ns = gen_beep(buf, S_BUF_LEN, 1320.0f, 80, amp);
             i2s_write(I2S_PORT, buf, ns * 2, &bw, portMAX_DELAY);
-            delay(40);
+            if (k == 0) write_silence(buf, 70);
         }
     } else {
         size_t ns = gen_beep(buf, S_BUF_LEN, 880.0f, 160, amp);
