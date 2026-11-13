@@ -369,6 +369,9 @@ struct AlertMemory {
 // "New" means not in range during the last ALERT_FORGET_MS (and "crosses into the radius"
 // likewise): an aircraft that drops out of the feed for a poll or two, such as a low
 // helicopter or one flying along the range edge, would otherwise ping every time it came back.
+// Pings follow what is DRAWN (radar::isShown: in range and among the nearest aircraft the
+// scope shows), so a beep always has a glyph to look at; one that is in range but not drawn
+// pings when it first appears. Emergency squawks in range are always drawn (past every cap).
 // An emergency squawk (7500/7600/7700) pings when the aircraft enters range squawking it, or
 // when one already in range starts squawking it; again only if it wasn't squawking one in the
 // last ALERT_EMERG_REPING_MS, so a squawk that flickers in the feed doesn't ping every poll.
@@ -382,6 +385,7 @@ static void checkAudioEvents() {
     for (const Aircraft &ac : g_snap) {
         const double d = geo::haversineKm(g_settings.homeLat, g_settings.homeLon, ac.lat, ac.lon);
         if (d > g_settings.rangeKm) continue;                 // in-range only
+        if (!radar::isShown(ac.hex.c_str())) continue;        // and drawn on the scope
         const uint32_t id = acId(ac.hex.c_str());
         const bool isNew     = !first && !seen.recent(id, nowMs, ALERT_FORGET_MS);
         seen.touch(id, nowMs);
@@ -395,13 +399,13 @@ static void checkAudioEvents() {
             squawked.touch(id, nowMs);
         }
 
-        // proximity: fire once, when an aircraft first crosses into the radius (any aircraft)
+        // proximity: fire once, when an aircraft first crosses into the radius (any drawn aircraft)
         if (g_proximityKm > 0.0f && d <= g_proximityKm) {
             if (!first && !seenProx.recent(id, nowMs, ALERT_FORGET_MS)) audio_play(AUDIO_ALERT);
             seenProx.touch(id, nowMs);
         }
 
-        // new-in-range pings (on entry), gated by the alert mode
+        // new pings (on first appearing on the scope), gated by the alert mode
         if (isNew && !squawk) {                                           // squawks: above
             if (emergency) { if (g_alertMode >= 1) audio_play(AUDIO_ALERT); }   // military: as an emergency
             else if (g_alertMode >= 2 && nowMs - lastNew > 3000) {
