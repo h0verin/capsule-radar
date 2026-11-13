@@ -63,7 +63,7 @@ static WiFiManager           g_wm;
 static int                   g_brightnessDay = BRIGHTNESS_DEFAULT;   // user brightness (web/NVS)
 static int                   g_volume = 60;                          // alert volume 0..100 (web/NVS)
 static bool                  g_muted  = false;                       // mute alert pings
-static int                   g_alertMode = 2;                        // 0=off 1=emergencies 2=new+emergencies (web/NVS)
+static int                   g_alertMode = 2;                        // 0=off 1=emergencies 2=new+emergencies 3=military+emergencies (web/NVS)
 static float                 g_proximityKm = 0.0f;                   // proximity alert radius, km (0=off) (web/NVS)
 static uint32_t              g_idleDimMs = IDLE_DIM_MS;              // dim after this idle time (0 = never)
 static bool                  g_fdSleep = true;                       // face-down sleep (screen off) on/off (web/NVS)
@@ -309,7 +309,7 @@ static void loadSettings() {
     g_brightnessDay    = constrain(p.getInt("bright", BRIGHTNESS_DEFAULT), 5, 255);
     g_volume           = p.getInt("vol", 60);
     g_muted            = p.getBool("mute", false);
-    g_alertMode        = p.getInt("alertmode", 2);
+    g_alertMode        = constrain(p.getInt("alertmode", 2), 0, 3);
     g_proximityKm      = p.getFloat("proxkm", 0.0f);
     g_useGps           = p.getBool("usegps", false);
     g_trailLen         = p.getInt("traillen", 2);
@@ -364,7 +364,9 @@ struct AlertMemory {
     }
 };
 
-// Audio alerts. g_alertMode: 0 = off, 1 = emergencies only, 2 = new aircraft + emergencies.
+// Audio alerts. g_alertMode (values kept stable for NVS; the web list shows them in a
+// different order): 0 = off, 1 = emergency squawks only, 3 = new military aircraft +
+// emergencies, 2 = new aircraft + emergencies (military included).
 // g_proximityKm > 0 also pings (once) when any aircraft crosses into that radius.
 // "New" means not in range during the last ALERT_FORGET_MS (and "crosses into the radius"
 // likewise): an aircraft that drops out of the feed for a poll or two, such as a low
@@ -389,12 +391,11 @@ static void checkAudioEvents() {
         const uint32_t id = acId(ac.hex.c_str());
         const bool isNew     = !first && !seen.recent(id, nowMs, ALERT_FORGET_MS);
         seen.touch(id, nowMs);
-        const bool squawk    = acIsEmergency(ac.squawk);
-        const bool emergency = squawk || ac.military;                   // military: feed dbFlags
+        const bool squawk    = acIsEmergency(ac.squawk);                // ac.military: feed dbFlags
 
         // emergency squawk: on entry or mid-flight, in any mode but off
         if (squawk) {
-            if (!first && g_alertMode >= 1 && !squawked.recent(id, nowMs, ALERT_EMERG_REPING_MS))
+            if (!first && g_alertMode != 0 && !squawked.recent(id, nowMs, ALERT_EMERG_REPING_MS))
                 audio_play(AUDIO_EMERGENCY);                    // its own sound: three rising beeps
             squawked.touch(id, nowMs);
         }
@@ -407,8 +408,8 @@ static void checkAudioEvents() {
 
         // new pings (on first appearing on the scope), gated by the alert mode
         if (isNew && !squawk) {                                           // squawks: above
-            if (emergency) { if (g_alertMode >= 1) audio_play(AUDIO_ALERT); }   // military: as an emergency
-            else if (g_alertMode >= 2 && nowMs - lastNew > 3000) {
+            if (ac.military) { if (g_alertMode >= 2) audio_play(AUDIO_ALERT); } // military: modes 2 and 3
+            else if (g_alertMode == 2 && nowMs - lastNew > 3000) {
                 audio_play(AUDIO_NEW);                                          // new contact (rate-limited)
                 lastNew = nowMs;
             }
@@ -656,11 +657,14 @@ static void handleRoot() {
         snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", mv.ft, mv.ft == g_maxAltFt ? " selected" : "", mv.lbl);
         mbopts += o;
     }
-    const char *anames[] = {"Off", "Emergencies only", "New aircraft + emergencies"};
+    // Shown in this order; the values are the stored g_alertMode (3 was added later).
+    const struct { int v; const char *name; } amodes[] = {
+        {0, "Off"}, {1, "Emergencies only"}, {3, "New military aircraft + emergencies"},
+        {2, "New aircraft + emergencies"}};
     String aopts;
-    for (int i = 0; i < 3; ++i) {
-        char o[80];
-        snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_alertMode ? " selected" : "", anames[i]);
+    for (const auto &am : amodes) {
+        char o[96];
+        snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", am.v, am.v == g_alertMode ? " selected" : "", am.name);
         aopts += o;
     }
     const int proxUnit[] = {0, 2, 5, 10, 25};   // 0 = off; rest in the user's distance unit
@@ -924,7 +928,7 @@ static void handleVol() {
 
 static void handleAlerts() {   // what triggers the alert sound (live)
     if (refuseUnlessPageFetch()) return;
-    if (g_web.hasArg("mode")) g_alertMode   = constrain((int)g_web.arg("mode").toInt(), 0, 2);
+    if (g_web.hasArg("mode")) g_alertMode   = constrain((int)g_web.arg("mode").toInt(), 0, 3);
     if (g_web.hasArg("prox")) {
         g_proximityKm = g_web.arg("prox").toFloat();   // km (0 = off)
         g_requeryKm = queryRadiusKm();                 // the query must cover the new alert circle
