@@ -395,7 +395,7 @@ static void checkAudioEvents() {
         // emergency squawk: on entry or mid-flight, in any mode but off
         if (squawk) {
             if (!first && g_alertMode >= 1 && !squawked.recent(id, nowMs, ALERT_EMERG_REPING_MS))
-                audio_play(AUDIO_ALERT);
+                audio_play(AUDIO_EMERGENCY);                    // its own sound: three rising beeps
             squawked.touch(id, nowMs);
         }
 
@@ -913,8 +913,11 @@ static void handleVol() {
         p.end();
     }
     if (g_web.hasArg("test")) {
-        if (g_web.arg("test").toInt() == 2) audio_selftest();   // long tone, ignores mute
-        else audio_play(AUDIO_NEW);
+        const int t = g_web.arg("test").toInt();
+        if (t == 2)      audio_selftest();              // long tone, ignores mute
+        else if (t == 3) audio_play(AUDIO_EMERGENCY);   // check the alert sounds by ear
+        else if (t == 4) audio_play(AUDIO_ALERT);
+        else             audio_play(AUDIO_NEW);
     }
     g_web.send(200, "text/plain", "ok");
 }
