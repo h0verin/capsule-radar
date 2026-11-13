@@ -369,12 +369,15 @@ struct AlertMemory {
 // "New" means not in range during the last ALERT_FORGET_MS (and "crosses into the radius"
 // likewise): an aircraft that drops out of the feed for a poll or two, such as a low
 // helicopter or one flying along the range edge, would otherwise ping every time it came back.
+// An emergency squawk (7500/7600/7700) pings when the aircraft enters range squawking it, or
+// when one already in range starts squawking it; again only if it wasn't squawking one in the
+// last ALERT_EMERG_REPING_MS, so a squawk that flickers in the feed doesn't ping every poll.
 static void checkAudioEvents() {
     if (!audio_present()) return;
-    static AlertMemory seen, seenProx;
+    static AlertMemory seen, seenProx, squawked;
     static bool first = true;
     static uint32_t lastNew = 0;
-    if (!seen.ready() || !seenProx.ready()) return;
+    if (!seen.ready() || !seenProx.ready() || !squawked.ready()) return;
     const uint32_t nowMs = millis();
     for (const Aircraft &ac : g_snap) {
         const double d = geo::haversineKm(g_settings.homeLat, g_settings.homeLon, ac.lat, ac.lon);
@@ -382,7 +385,15 @@ static void checkAudioEvents() {
         const uint32_t id = acId(ac.hex.c_str());
         const bool isNew     = !first && !seen.recent(id, nowMs, ALERT_FORGET_MS);
         seen.touch(id, nowMs);
-        const bool emergency = acIsEmergency(ac.squawk) || ac.military;  // military: feed dbFlags
+        const bool squawk    = acIsEmergency(ac.squawk);
+        const bool emergency = squawk || ac.military;                   // military: feed dbFlags
+
+        // emergency squawk: on entry or mid-flight, in any mode but off
+        if (squawk) {
+            if (!first && g_alertMode >= 1 && !squawked.recent(id, nowMs, ALERT_EMERG_REPING_MS))
+                audio_play(AUDIO_ALERT);
+            squawked.touch(id, nowMs);
+        }
 
         // proximity: fire once, when an aircraft first crosses into the radius (any aircraft)
         if (g_proximityKm > 0.0f && d <= g_proximityKm) {
@@ -391,8 +402,8 @@ static void checkAudioEvents() {
         }
 
         // new-in-range pings (on entry), gated by the alert mode
-        if (isNew) {
-            if (emergency) { if (g_alertMode >= 1) audio_play(AUDIO_ALERT); }   // emergencies only / +new
+        if (isNew && !squawk) {                                           // squawks: above
+            if (emergency) { if (g_alertMode >= 1) audio_play(AUDIO_ALERT); }   // military: as an emergency
             else if (g_alertMode >= 2 && nowMs - lastNew > 3000) {
                 audio_play(AUDIO_NEW);                                          // new contact (rate-limited)
                 lastNew = nowMs;

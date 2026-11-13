@@ -33,6 +33,7 @@ static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f
 #define AC_STALE_MS         15000          // keep the last contacts through brief empty feed responses
 #define ALERT_FORGET_MS     (15UL * 60UL * 1000UL)  // "new" = not in range for this long (no re-ping on dropouts)
 #define ALERT_MEMORY_SLOTS  256            // aircraft the alerts remember (8 B each, in PSRAM); oldest reused
+#define ALERT_EMERG_REPING_MS (10UL * 60UL * 1000UL) // an emergency squawk pings again only after this long without one
 
 // ---------- Weather forecast (Open-Meteo, no API key) ----------
 #define WEATHER_REFRESH_MS  1800000UL      // 30 minutes; forecast data changes slowly
