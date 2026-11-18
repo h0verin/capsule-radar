@@ -7,6 +7,7 @@ void ui_frame_done(void);       // the display driver finished sending a full fr
 bool ui_sweep_visible(void);     // radar tile shown and not mid-swipe (sweep compositor)
 int  ui_sweep_masks(int16_t out[][5], int max);   // logical x1,y1,x2,y2,radius: rounded boxes the sweep must not paint over
 void ui_on_data_updated(void);   // refresh card/list/stats after radar::update()
+bool ui_detail_open(void);       // the tap-to-inspect detail card is showing
 void ui_show_view(int idx);      // 0 = radar, 1 = list, 2 = stats, 3 = weather
 void ui_set_view_changed_cb(void (*cb)(int idx));  // fired on swipe — lets main remember the last view
 void ui_set_status(bool wifiUp, bool feedOk, int rssi, const char *clock);  // HUD: signal bars (count=RSSI, colour: red=down, amber=stale feed, white=ok) + clock

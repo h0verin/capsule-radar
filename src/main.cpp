@@ -9,6 +9,7 @@
 #include "adsb_client.h"
 #include "snapshot_gate.h"
 #include "feed_watchdog.h"
+#include "wifi_roam.h"                // move to a clearly stronger mesh node while connected
 #include "route.h"
 #include "route_client.h"
 #include "photo.h"
@@ -100,6 +101,9 @@ static String                g_tz = TZ_STR;                          // POSIX ti
 static volatile bool         g_weatherDirty = false;
 static volatile bool         g_wxRadarDirty = false;
 static volatile bool         g_cloudImageDirty = false;
+static volatile uint32_t     g_roamHoldUntilMs = 0;                  // !=0: our own WiFi move is under way; the HUD keeps its pre-move state until then
+static volatile bool         g_uiInUse = false;                      // touched in the last WIFI_ROAM_IN_USE_MS or a detail card open (core 1 -> core 0)
+static volatile bool         g_otaBusy = false;                      // an OTA upload is running: no WiFi moves
 
 // Web-selectable time zones (label + POSIX TZ). The <option> value is the index; the save
 // handler maps it back to the POSIX string stored in NVS and used by configTzTime at boot.
@@ -128,6 +132,85 @@ static const struct { const char *label; const char *tz; int offMin; int dst; } 
 };
 static const int TZOPTS_N = sizeof(TZOPTS) / sizeof(TZOPTS[0]);
 
+// ---- WiFi: move to a clearly stronger mesh node while connected (wifi_roam.h decides) ----
+// Runs in adsb_task between fetches, so a check never lands inside a request. A check is one
+// active scan of our SSID on the current channel (~WIFI_ROAM_SCAN_MS_PER_CHAN); a move is
+// WiFi.reconnect() with the saved config, which scans every channel and joins the strongest
+// node (wifi_prefer_strongest_ap). Nothing is pinned to a node and nothing is written to flash.
+static void bssid_str(const uint8_t b[6], char out[18]) {
+    snprintf(out, 18, "%02X:%02X:%02X:%02X:%02X:%02X", b[0], b[1], b[2], b[3], b[4], b[5]);
+}
+
+static int roam_collect(int n, const String &ssid, WifiRoam::Seen *out, int max) {
+    int k = 0;
+    for (int i = 0; i < n && k < max; i++) {
+        if (WiFi.SSID(i) != ssid) continue;      // the scan asked for our SSID; belt and braces
+        WiFi.BSSID(i, out[k].bssid);
+        out[k].rssi = (int)WiFi.RSSI(i);
+        k++;
+    }
+    return k;
+}
+
+// One check, if due. Returns true when a move was started.
+static bool roam_check(WifiRoam &roam) {
+    if (g_bootedIntoPortal || g_otaBusy || g_requery || WiFi.status() != WL_CONNECTED) return false;
+    const WifiRoam::Due due = roam.due(millis());
+    if (due == WifiRoam::NOT_DUE) return false;
+    const String ssid = WiFi.SSID();
+    uint8_t cur[6];
+    WiFi.BSSID(cur);
+    const int curRssi = (int)WiFi.RSSI();
+    const uint32_t t0 = millis();
+    WifiRoam::Seen seen[8];
+    int16_t n = WiFi.scanNetworks(false, false, false, WIFI_ROAM_SCAN_MS_PER_CHAN,
+                                  (uint8_t)WiFi.channel(), ssid.c_str());
+    int k = n > 0 ? roam_collect(n, ssid, seen, 8) : 0;
+    bool wide = false;
+    if (n >= 0 && roam.wantWideScan(seen, k, cur, millis())) {   // weak link, nobody else on this channel
+        WiFi.scanDelete();
+        n = WiFi.scanNetworks(false, false, false, WIFI_ROAM_SCAN_MS_PER_CHAN, 0, ssid.c_str());
+        k = n > 0 ? roam_collect(n, ssid, seen, 8) : 0;
+        wide = true;
+    }
+    WiFi.scanDelete();
+    const unsigned scanMs = (unsigned)(millis() - t0);
+    if (n < 0) {
+        roam.scanFailed(millis());
+        Serial.printf("[wifi] roam check: scan failed (%d) after %u ms\n", (int)n, scanMs);
+        return false;
+    }
+    int best = -1, here = curRssi;
+    const WifiRoam::Verdict v = roam.decide(cur, curRssi, seen, k, millis(), &best, &here);
+    char hereS[18], bestS[18], avgS[24] = "", otherS[40] = "best other: none";
+    bssid_str(cur, hereS);
+    float avg;
+    if (roam.averageRssi(&avg))                  // what decides "weak", next to this check's reading
+        snprintf(avgS, sizeof avgS, " (avg %.1f%s)", avg, roam.weak() ? " weak" : "");
+    if (best >= 0) {
+        bssid_str(seen[best].bssid, bestS);
+        snprintf(otherS, sizeof otherS, "best other %s %d dBm", bestS, seen[best].rssi);
+    }
+    static const char *const kVerdict[] = {"stay (no other node)", "stay (other too weak)",
+                                           "stay (other not clearly stronger)", "move"};
+    Serial.printf("[wifi] roam check (%s%s): here %s %d dBm%s, %s, %d heard, scan %u ms -> %s\n",
+                  due == WifiRoam::DUE_WEAK ? "weak signal" : "scheduled", wide ? ", all channels" : "",
+                  hereS, here, avgS, otherS, k, scanMs, kVerdict[v]);
+    if (v != WifiRoam::MOVE) return false;
+    if (g_uiInUse) {                             // someone is using it: never drop WiFi under their finger
+        roam.deferMove(millis());
+        Serial.printf("[wifi] roam: radar in use -> move waits, looking again in %u s\n",
+                      (unsigned)(WIFI_ROAM_DEFER_MS / 1000));
+        return false;
+    }
+    g_roamHoldUntilMs = (millis() + WIFI_ROAM_HUD_HOLD_MS) | 1u;   // HUD: keep the pre-move state
+    roam.onMoveStarted(cur, millis());
+    Serial.printf("[wifi] roam: leaving %s for the stronger node\n", hereS);
+    if (!WiFi.reconnect()) Serial.println("[wifi] roam: reconnect request failed");
+    return true;
+}
+
+
 // ---- networking task (core 0): fetch + parse, never touches the display ----
 static void adsb_task(void*) {
     std::vector<Aircraft> fresh;
@@ -139,6 +222,9 @@ static void adsb_task(void*) {
     uint32_t nextWxRadarAt = UINT32_MAX;
     uint32_t nextCloudImageAt = UINT32_MAX;
     FeedWatchdog watchdog(millis());         // self-heal: see feed_watchdog.h
+    WifiRoam roam;                           // stronger mesh node: see wifi_roam.h and roam_check()
+    uint32_t roamMoveAt = 0;                 // !=0: millis() when our own move started
+    bool roamRetried = false;
     for (;;) {
         const bool conn = (WiFi.status() == WL_CONNECTED);
         if (conn && !wasConnected) {
@@ -148,14 +234,34 @@ static void adsb_task(void*) {
             Serial.printf("[adsb] WiFi up, IP %s (AP %s, ch %d, %d dBm)\n",
                           WiFi.localIP().toString().c_str(), WiFi.BSSIDstr().c_str(),
                           (int)WiFi.channel(), (int)WiFi.RSSI());
-            configTzTime(g_tz.c_str(), "pool.ntp.org", "time.nist.gov");  // local time (web-configurable TZ)
-            Serial.println("[web] config: http://capsuleradar.local/  (or the IP above)");
-            nextWeatherAt = millis() + 5000UL; // let the first ADS-B poll complete before weather TLS
-            nextCloudImageAt = millis() + 15000UL;
-            nextWxRadarAt = millis() + 12000UL;
+            uint8_t bssid[6];
+            WiFi.BSSID(bssid);
+            const WifiRoam::Rejoin rejoin = roam.onConnected(bssid, millis());
+            if (rejoin == WifiRoam::JOINED) {
+                configTzTime(g_tz.c_str(), "pool.ntp.org", "time.nist.gov");  // local time (web-configurable TZ)
+                Serial.println("[web] config: http://capsuleradar.local/  (or the IP above)");
+                nextWeatherAt = millis() + 5000UL; // let the first ADS-B poll complete before weather TLS
+                nextCloudImageAt = millis() + 15000UL;
+                nextWxRadarAt = millis() + 12000UL;
+            } else {
+                // Back from our own move: same network and address, so keep the time sync and the
+                // weather/radar/cloud schedules (re-arming them would re-download and redraw).
+                Serial.printf("[wifi] roam: %s after %u ms\n",
+                              rejoin == WifiRoam::MOVED ? "moved" : "back on the same node",
+                              (unsigned)(millis() - roamMoveAt));
+            }
+            g_roamHoldUntilMs = 0;               // the HUD shows the real state again
+            roamMoveAt = 0;
             // mDNS + OTA are started on core 1 (loop) to keep all mDNS use on one core
+        } else if (!conn && wasConnected) {
+            roam.onDisconnected();
         }
         wasConnected = conn;
+        if (!conn && roamMoveAt && !roamRetried && millis() - roamMoveAt > WIFI_ROAM_RETRY_MS) {
+            roamRetried = true;                  // our move hasn't come back: ask once more; after
+            Serial.println("[wifi] roam: not back yet, reconnecting again");  // that the core's own
+            WiFi.reconnect();                    // auto-reconnect handles it as any other drop
+        }
         // Self-heal: reboot at once for a fragmented internal heap starving TLS, and as a
         // last resort after ADSB_STUCK_HARD_MS whatever the heap says. Not for refusals or
         // a short internet outage behind working WiFi (see feed_watchdog.h).
@@ -194,6 +300,7 @@ static void adsb_task(void*) {
             const uint32_t pollInterval = g_onBattery ? POLL_INTERVAL_BATTERY_MS : POLL_INTERVAL_MS;
             if (lastPoll == 0 || nowMs - lastPoll >= pollInterval) {  // aircraft feed
                 lastPoll = nowMs;
+                roam.onPollRssi((int)WiFi.RSSI());   // the weak-signal trigger averages the last 3
                 static int failCount = 0;
                 // poll() tries the fallback provider after a primary failure; keep the HUD
                 // healthy through isolated misses and warn only after a sustained outage.
@@ -293,6 +400,10 @@ static void adsb_task(void*) {
             }
             char wantHex[10];
             if (photo_pending(wantHex, sizeof(wantHex))) photo_fetch(wantHex);
+        }
+        if (conn && roam_check(roam)) {          // between fetches, never inside one
+            roamMoveAt = millis();
+            roamRetried = false;
         }
         vTaskDelay(pdMS_TO_TICKS(250));
     }
@@ -1211,6 +1322,7 @@ static void handleUpdateUpload() {
         g_updateDone = false;
         g_updateBlocked = requestCrossSite();   // can't answer from here: 403 goes out on completion
         if (g_updateBlocked) { Serial.println("[update] upload refused (cross-site)"); return; }
+        g_otaBusy = true;                       // no WiFi moves while an image is coming in
         Serial.printf("[update] start: %s\n", up.filename.c_str());
         // An earlier upload that never reached END (page closed, WiFi drop) leaves Update
         // "running"; begin() then fails and EVERY later upload bricks at 0 % until a
@@ -1222,12 +1334,14 @@ static void handleUpdateUpload() {
             Update.write(up.buf, up.currentSize) != up.currentSize) Update.printError(Serial);
     } else if (up.status == UPLOAD_FILE_END) {
         if (g_updateBlocked) return;           // refused above: nothing to finish
+        g_otaBusy = false;
         g_updateDone = Update.end(true);
         if (g_updateDone) Serial.printf("[update] done: %u bytes\n", (unsigned)up.totalSize);
         else Update.printError(Serial);
     } else if (up.status == UPLOAD_FILE_ABORTED) {
         // The browser gave up mid-stream. Free the writer so the NEXT upload can begin.
         Update.abort();
+        g_otaBusy = false;
         Serial.println("[update] upload aborted");
     }
 }
@@ -1499,6 +1613,9 @@ void loop() {
     static bool otaUp = false;
     if (!otaUp && WiFi.status() == WL_CONNECTED) {
         ArduinoOTA.setHostname("capsuleradar");        // -> capsuleradar.local (registers mDNS)
+        ArduinoOTA.onStart([] { g_otaBusy = true; });  // no WiFi moves while an image is coming in
+        ArduinoOTA.onEnd([] { g_otaBusy = false; });
+        ArduinoOTA.onError([](ota_error_t) { g_otaBusy = false; });
         ArduinoOTA.begin();
         MDNS.addService("http", "tcp", 80);            // advertise the config web page
         otaUp = true;
@@ -1554,21 +1671,31 @@ void loop() {
             strftime(date, sizeof(date), "%d %b %Y", &ti);   // e.g. "08 Jun 2026"
             ui_set_date(date);
         }
-        const bool wifiUp = (WiFi.status() == WL_CONNECTED);
-        const int  rssi   = wifiUp ? (int)WiFi.RSSI() : -127;
+        // During our own move to a stronger node (a few seconds), keep showing the state from
+        // before it, so the HUD and Stats page don't flash "no WiFi" for a planned reconnect.
+        // A real outage still shows once the hold (WIFI_ROAM_HUD_HOLD_MS) is over.
+        const uint32_t holdUntil = g_roamHoldUntilMs;
+        const bool roamHold = holdUntil && (int32_t)(holdUntil - millis()) > 0;
+        const bool linkUp = (WiFi.status() == WL_CONNECTED);
+        static int lastRssi = -127;
+        if (linkUp) lastRssi = (int)WiFi.RSSI();
+        const bool wifiUp = linkUp || roamHold;
+        const int  rssi   = wifiUp ? lastRssi : -127;
         // "fresh" = we got aircraft data recently. Catches a stalled feed (weak WiFi dropping
         // polls intermittently) that never trips the consecutive-fail counter -> aircraft
         // freeze but the icon would otherwise stay white.
         const bool feedFresh = wifiUp && (millis() - g_lastFeedOkMs < 18000UL);
         ui_set_status(wifiUp, feedFresh, rssi, clk);
-        char net[112];
-        if (WiFi.status() == WL_CONNECTED)
-            // IP + the active centre point (helps users verify what actually got saved)
-            snprintf(net, sizeof(net), "Configure at\ncapsuleradar.local\n%s  |  %.5f, %.5f",
-                     WiFi.localIP().toString().c_str(), g_settings.homeLat, g_settings.homeLon);
-        else
-            snprintf(net, sizeof(net), "WiFi setup:\njoin CapsuleRadar-Setup");
-        ui_set_netinfo(net);
+        if (!(roamHold && !linkUp)) {           // during the hold, keep the last line
+            char net[112];
+            if (WiFi.status() == WL_CONNECTED)
+                // IP + the active centre point (helps users verify what actually got saved)
+                snprintf(net, sizeof(net), "Configure at\ncapsuleradar.local\n%s  |  %.5f, %.5f",
+                         WiFi.localIP().toString().c_str(), g_settings.homeLat, g_settings.homeLon);
+            else
+                snprintf(net, sizeof(net), "WiFi setup:\njoin CapsuleRadar-Setup");
+            ui_set_netinfo(net);
+        }
         ui_set_feed_source(g_adsb.lastHost());   // Stats "Feed" line: who served the last data
         const bool bpresent = battery_present();
         ui_set_battery(battery_percent(), battery_charging(), bpresent);
@@ -1626,6 +1753,8 @@ void loop() {
     // radar sends the clock away at once. The clock needs the radar view on screen and a
     // known time (radar::setClock refuses without one, and is asked again next pass).
     g_idle = g_idleDimMs > 0 && display::inactiveMs() > g_idleDimMs;
+    // adsb_task holds a WiFi move while someone is using the radar (read there, set here: LVGL).
+    g_uiInUse = display::inactiveMs() < WIFI_ROAM_IN_USE_MS || ui_detail_open();
     const bool wantClock = g_clockOn && g_idle && ui_sweep_visible();
     g_clockHold = wantClock && radar::emergencyInRange();      // an emergency nearby: radar stays up
     const bool showClock = wantClock && !g_clockHold;

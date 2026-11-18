@@ -179,6 +179,25 @@ static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f
 // never gets here: the first answer resets the clock.
 #define ADSB_STUCK_HARD_MS    1800000UL     // 30 min
 
+// ---------- WiFi: move to a clearly stronger mesh node (src/wifi_roam.h) ----------
+// The join already picks the strongest node; these let a connected radar look again, so a
+// mesh restart that left it on a far node doesn't keep it there until the next reboot.
+#define WIFI_ROAM_FIRST_CHECK_MS  180000UL  // first look 3 min after WiFi comes up
+#define WIFI_ROAM_PERIOD_MS       600000UL  // then every 10 min
+#define WIFI_ROAM_MAX_PERIOD_MS  2400000UL  // slowed down (below) at most to every 40 min
+#define WIFI_ROAM_ALONE_CHECKS    3         // this many checks in a row hear no other node -> 20, then 40 min
+#define WIFI_ROAM_WEAK_DBM        -70       // average of the last 3 feed polls below this -> look sooner
+#define WIFI_ROAM_WEAK_GAP_MS     120000UL  // ...but no more often than every 2 min
+#define WIFI_ROAM_WIDE_GAP_MS    3600000UL  // all-channel scan (weak link, no other node heard) at most hourly
+#define WIFI_ROAM_MARGIN_DB       10        // move only to a node at least this much stronger
+#define WIFI_ROAM_MIN_DBM         -65       // ...and at least this strong
+#define WIFI_ROAM_MOVE_GAP_MS     600000UL  // at most one move per 10 min
+#define WIFI_ROAM_SCAN_MS_PER_CHAN 120      // active scan time on each channel
+#define WIFI_ROAM_IN_USE_MS       30000UL   // touched this recently (or a detail card open) -> a move waits
+#define WIFI_ROAM_DEFER_MS        30000UL   // ...and is looked at again this much later
+#define WIFI_ROAM_HUD_HOLD_MS     10000UL   // during our own move the HUD shows the pre-move state up to this long
+#define WIFI_ROAM_RETRY_MS        20000UL   // still not back this long after a move -> ask to connect once more
+
 // ---------- Debug ----------
 #define DEBUG_MEM           0               // 1 = print a [mem] heap/fps line every 5s on serial
 

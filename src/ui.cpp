@@ -455,6 +455,10 @@ static void radar_presslost_cb(lv_event_t *e) {   // scroll stole the press: a s
 // A tap just outside the open card closes it, even on a plane: a finger aimed at the X or the
 // card's edge often lands a few px past the card, and that tap picked a plane instead. A second
 // tap picks the plane. Only taps that reach the radar tile come here: the zoom button keeps its own.
+bool ui_detail_open(void) {
+    return s_card && !lv_obj_has_flag(s_card, LV_OBJ_FLAG_HIDDEN);
+}
+
 static bool near_open_card(const lv_point_t &p) {
     if (!s_card || lv_obj_has_flag(s_card, LV_OBJ_FLAG_HIDDEN)) return false;
     lv_area_t a;
